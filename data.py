@@ -8,13 +8,14 @@ import numpy as np
 import torchvision
 
 class ROARdata(ABC):
-    def __init__(self, transforms, n_degradation_steps = 10):
+    def __init__(self, transforms, device, n_degradation_steps = 10):
 
         self.transforms = transforms
         self.n_degradation_steps = n_degradation_steps
         self.size_degradation_steps = 1./n_degradation_steps
         self.data = None
         self.explanations = None
+        self.device = device
 
         # self degradation status, starts at 1. -- no corruption, ends with 0. -- full corruption
         self.degradation_status = 1.
@@ -28,30 +29,29 @@ class ROARdata(ABC):
 
 
     def compute_explanations(self, model, method, **kwargs):
+        # Batch size used for computing the explanations
+        BATCH_SIZE = 256
+
         #TODO make this also distributed
 
         # Initalise the explainability method
-        explainer = method(net)
+        explainer = method
 
-        # Make batches of training data
-        train_batches = partial(
-            Batches,
-            dataset=self.data['train'],
-            shuffle=False,
-            drop_last=True,
-            max_options=200,
-            device=device
-        )
+        # Load model into the explainer
+        explainer.load_model(model)
 
-        transforms = (Crop(32, 32), FlipLR())
-        tbatches = train_batches(batch_size, transforms)
-        train_batch_count = len(tbatches)
+        train_set = self.data['train']
+        trainloader = torch.utils.data.DataLoader(train_set,
+                                                  batch_size = BATCH_SIZE,
+                                                  shuffle=False,
+                                                  num_workers=16)
 
-        # Explain batches with explainer
-        for count, batch in enumerate(tbatches):
-            explanations = explainer.attribute(batch)
-            self.explanations['train_explanations']['data'][count * batch_size : (count + 1 ) * batch_size, ... ] = \
-            explanations.data
+        for i, data in enumerate(trainloader, 0):
+            # get the inputs; data is a list of [inputs, labels]
+            inputs, labels = data[0].to(self.device), data[1].to(self.device)
+
+            explanations = explainer.attribute(inputs, labels)
+            self.explanations['train_explanations'][i * BATCH_SIZE : (i + 1 ) * BATCH_SIZE, ... ] = explanations.data
 
     def degrade_data(self, **kwargs):
         #TODO do this distributively
