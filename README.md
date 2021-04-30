@@ -1,5 +1,4 @@
-# ROAR, RemOve And Retrain benchmark on CIFAR 10
+# ROAR, RemOve And Retrain benchmark in PyTorch
 
-This repository consists of a code to run a ROAR explainability benchmark on CIFAR 10, using fast training
-
+What lion says? 🦁 Roarrrrrr! 
 TODO: write stuff here
