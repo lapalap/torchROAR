@@ -3,9 +3,12 @@
 ####################
 
 from abc import ABC, abstractmethod
+import torch
+import numpy as np
+import torchvision
 
 class ROARdata(ABC):
-    def __init__(self, n_degradation_steps):
+    def __init__(self, n_degradation_steps = 10):
         self.n_degradation_steps = n_degradation_steps
         self.size_degradation_steps = 1./n_degradation_steps
         self.data = None
@@ -58,21 +61,22 @@ class ROARdata(ABC):
                        degradation_status,
                        size_degradation_steps):
     #TODO do that
+        pass
 
     @abstractmethod
     def load_data(self, **kwargs):
         pass
 
 class ROARcifar10(ROARdata):
-    @cache(None)
-    def load_data(self, **kwargs):
+    def load_data(self, root = './data/', **kwargs):
         download = lambda train: torchvision.datasets.CIFAR10(root=root, train=train, download=True)
         self.data = {k: {'data': torch.tensor(v.data), 'targets': torch.tensor(v.targets)}
                     for k, v in [('train', download(True)), ('valid', download(False))]}
 
         # Explanations only for train data and should have same number of channels
-        self.explanations = {'train_explanations': {'data': torch.zeros_like(torch.tensor(v.data)),
-                                                    }}
+        self.explanations = {'train_explanations': {'data': torch.zeros_like(self.data['train']['data'])
+                                                    }
+                             }
 
 
 

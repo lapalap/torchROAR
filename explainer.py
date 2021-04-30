@@ -13,6 +13,10 @@ class Explainer(ABC):
     def attribute(self, batch):
         pass
 
+    @abstractmethod
+    def get_name(self):
+        pass
+
 class Saliency(Explainer):
     def __init__(self, model):
         self.model = model
