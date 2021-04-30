@@ -1,55 +1,83 @@
-import torch as nn
+import torch
+import torch.nn as nn
 
 
 #####################
-# ResNet9 (from here https://medium.com/swlh/natural-image-classification-using-resnet9-model-6f9dc924cd6d)
+# ResNet9 (from here https://github.com/matthias-wright/cifar10-resnet/blob/master/model.py)
 #####################
 
-class SimpleResidualBlock(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.conv1 = nn.Conv2d(in_channels=3, out_channels=3, kernel_size=3, stride=1, padding=1)
-        self.relu1 = nn.ReLU()
-        self.conv2 = nn.Conv2d(in_channels=3, out_channels=3, kernel_size=3, stride=1, padding=1)
-        self.relu2 = nn.ReLU()
+class ResidualBlock(nn.Module):
+    """
+    A residual block as defined by He et al.
+    """
+
+    def __init__(self, in_channels, out_channels, kernel_size, padding, stride):
+        super(ResidualBlock, self).__init__()
+        self.conv_res1 = nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size,
+                                   padding=padding, stride=stride, bias=False)
+        self.conv_res1_bn = nn.BatchNorm2d(num_features=out_channels, momentum=0.9)
+        self.conv_res2 = nn.Conv2d(in_channels=out_channels, out_channels=out_channels, kernel_size=kernel_size,
+                                   padding=padding, bias=False)
+        self.conv_res2_bn = nn.BatchNorm2d(num_features=out_channels, momentum=0.9)
+
+        if stride != 1:
+            # in case stride is not set to 1, we need to downsample the residual so that
+            # the dimensions are the same when we add them together
+            self.downsample = nn.Sequential(
+                nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(num_features=out_channels, momentum=0.9)
+            )
+        else:
+            self.downsample = None
+
+        self.relu = nn.ReLU(inplace=False)
 
     def forward(self, x):
-        out = self.conv1(x)
-        out = self.relu1(out)
-        out = self.conv2(out)
-        return self.relu2(out) + x  # ReLU can be applied before or after adding the input
+        residual = x
 
+        out = self.relu(self.conv_res1_bn(self.conv_res1(x)))
+        out = self.conv_res2_bn(self.conv_res2(out))
 
-def conv_block(in_channels, out_channels, pool=False, pool_no=2):
-    layers = [nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
-              nn.BatchNorm2d(out_channels),
-              nn.ReLU(inplace=True)]
-    if pool: layers.append(nn.MaxPool2d(pool_no))
-    return nn.Sequential(*layers)
+        if self.downsample is not None:
+            residual = self.downsample(residual)
+
+        out = self.relu(out)
+        out += residual
+        return out
 
 
 class ResNet9(nn.Module):
+    """
+    A Residual network.
+    """
     def __init__(self, in_channels, num_classes):
-        super().__init__()
+        super(ResNet9, self).__init__()
 
-        self.conv1 = conv_block(in_channels, 64)
-        self.conv2 = conv_block(64, 128, pool=True, pool_no=3)
-        self.res1 = nn.Sequential(conv_block(128, 128), conv_block(128, 128))
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_channels= in_channels, out_channels=64, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(num_features=64, momentum=0.9),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels=64, out_channels=128, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(num_features=128, momentum=0.9),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            ResidualBlock(in_channels=128, out_channels=128, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(in_channels=128, out_channels=256, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(num_features=256, momentum=0.9),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.Conv2d(in_channels=256, out_channels=256, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(num_features=256, momentum=0.9),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            ResidualBlock(in_channels=256, out_channels=256, kernel_size=3, stride=1, padding=1),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+        )
 
-        self.conv3 = conv_block(128, 256, pool=True)
-        self.conv4 = conv_block(256, 512, pool=True, pool_no=5)
-        self.res2 = nn.Sequential(conv_block(512, 512), conv_block(512, 512))
+        self.fc = nn.Linear(in_features=1024, out_features=num_classes, bias=True)
 
-        self.classifier = nn.Sequential(nn.MaxPool2d(5),
-                                        nn.Flatten(),
-                                        nn.Linear(512, num_classes))
-
-    def forward(self, xb):
-        out = self.conv1(xb)
-        out = self.conv2(out)
-        out = self.res1(out) + out
-        out = self.conv3(out)
-        out = self.conv4(out)
-        out = self.res2(out) + out
-        out = self.classifier(out)
+    def forward(self, x):
+        out = self.conv(x)
+        out = out.view(-1, out.shape[1] * out.shape[2] * out.shape[3])
+        out = self.fc(out)
         return out

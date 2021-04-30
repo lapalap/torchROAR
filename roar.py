@@ -1,6 +1,9 @@
 from utils import *
 from functools import partial
 from torch import distributed as dist
+import torch.optim as optim
+import torchvision.transforms as transforms
+from tqdm import tqdm
 from torch.nn.parallel import DistributedDataParallel as DDP
 import argparse
 import pandas as pd
@@ -15,9 +18,8 @@ from models import ResNet9
 def model_train(model,
                 dataset,
                 distributed,
-                train_configs):
-
-    timer = Timer(torch.cuda.synchronize)
+                train_configs,
+                device):
 
     if distributed:
         pass
@@ -172,102 +174,34 @@ def model_train(model,
 
     else:
         #Standalone training
-        dataset = map_nested(to(device), dataset)
-        timer()
-        data_transfer_time = timer.total_time
 
-        train_set = dataset['train']
-        valid_set = dataset['valid']
+        train_set = dataset.get_train_data()
+        valid_set = dataset.get_valid_data()
 
+        trainloader = torch.utils.data.DataLoader(train_set, batch_size= train_configs['batch_size'],
+                                                  shuffle=True, num_workers=16)
+        valloader = torch.utils.data.DataLoader(valid_set, batch_size=train_configs['batch_size'],
+                                                 shuffle=False, num_workers=16)
 
-        train_batches = partial(
-            Batches,
-            dataset=train_set,
-            shuffle=True,
-            drop_last=True,
-            max_options=200,
-            device=device
-        )
+        criterion = train_configs['criterion']()
+        optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
 
-        valid_batches = partial(
-            Batches,
-            dataset=valid_set,
-            shuffle=False,
-            drop_last=False,
-            device=device
-        )
+        for epoch in tqdm(range(train_configs['epochs'])):  # loop over the dataset multiple times
+            running_loss = 0.0
+            for i, data in enumerate(trainloader, 0):
+                # get the inputs; data is a list of [inputs, labels]
+                inputs, labels = data[0].to(device), data[1].to(device)
 
-        # Data iterators
-        transforms = (Crop(32, 32), FlipLR())
-        tbatches = train_batches(train_configs['batch_size'], transforms)
-        train_batch_count = len(tbatches)
-        vbatches = valid_batches(train_configs['batch_size'])
+                # zero the parameter gradients
+                optimizer.zero_grad()
 
-
-        is_bias = group_by_key(('bias' in k, v) for k, v in trainable_params(model).items())
-        loss = nn.CrossEntropyLoss()
-
-        # Construct the learning rate, weight decay and momentum schedules.
-        opt_params = {'lr': lr_schedule(
-            [0, train_configs['epochs'] / train_configs['warmup_fraction'], train_configs['epochs'] - train_configs['ema_epochs']],
-            [0.0, train_configs['lr_scaler'] * 1.0, train_configs['lr_scaler'] * train_configs['lr_end_fraction']],
-            train_configs['batch_size'], train_batch_count
-        ),
-            'weight_decay': Const(5e-4 * train_configs['lr_scaler'] * train_configs['batch_size']), 'momentum': Const(0.9)}
-
-        opt_params_bias = {'lr': lr_schedule(
-            [0, train_configs['epochs'] / train_configs['warmup_fraction'], train_configs['epochs'] - train_configs['ema_epochs']],
-            [0.0, train_configs['lr_scaler'] * 1.0 * 64, train_configs['lr_scaler'] * train_configs['lr_end_fraction'] * 64],
-            train_configs['batch_size'], train_batch_count
-        ),
-            'weight_decay': Const(5e-4 * train_configs['lr_scaler'] * train_configs['batch_size'] / 64), 'momentum': Const(0.9)}
-
-        opt = SGDOpt(
-            weight_param_schedule=opt_params,
-            bias_param_schedule=opt_params_bias,
-            weight_params=is_bias[False],
-            bias_params=is_bias[True]
-        )
-
-        # Train the network
-        model.train(True)
-        epochs_log = []
-        for epoch in range(train_configs['epochs']):
-            activations_log = []
-            for tb in tbatches:
-                # Forward step
-                out = loss(model(tb))
-                model.zero_grad()
-                out.sum().backward()
-                opt.step()
-
-                # Log activations
-                activations_log.append(('loss', out['loss'].detach()))
-                activations_log.append(('acc', out['acc'].detach()))
-
-            # Compute the average over the activation logs for the last epoch
-            res = map_values((lambda xs: to_numpy(torch.cat(xs)).astype(np.float)), group_by_key(activations_log))
-            train_summary = mean_members(res)
-        #     timer()
-        #
-        #     # Evaluate the model
-        #     # Copy the weights to the local model
-        #     model_dict = {k[7:]: v for k, v in distributed_model.state_dict().items()}
-        #     local_eval_model.load_state_dict(model_dict)
-        #     valid_summary = eval_on_batches(local_eval_model, loss, vbatches)
-        #     timer(update_total=False)
-        #     time_to_epoch_end = timer.total_time + data_transfer_time
-        #     epochs_log.append(
-        #         {
-        #             'valid': valid_summary,
-        #             'train': train_summary,
-        #             'time': time_to_epoch_end
-        #         }
-        #     )
-        #
-        # # Wait until all models finished training
-        # dist.barrier()
-        # timer()
+                # forward + backward + optimize
+                outputs = model(inputs)
+                print(outputs.shape)
+                print(labels.shape)
+                loss = criterion(outputs, labels)
+                loss.backward()
+                optimizer.step()
 
     return model
 
@@ -279,20 +213,27 @@ def eval_roar(xai_method,
               data_configs,
               roar_configs,
               model_configs,
-              train_configs):
+              train_configs,
+              device):
 
     # define model
     model = model_configs['model'](in_channels = data_configs['n_channels'],
                                    num_classes = data_configs['n_classes'])
 
-    # get data
-    dataset = data_configs['dataset'](n_degradation_steps = roar_configs['degradation_steps'])
+    # get data class
+    dataset = data_configs['dataset'](transforms = data_configs['transforms'],
+                                      n_degradation_steps = roar_configs['degradation_steps'])
+
+    #load data
+    dataset.load_data()
+
 
     # train first time
     model = model_train(model = model,
                         dataset = dataset,
                         distributed = roar_configs['distributed'],
-                        train_configs = train_configs
+                        train_configs = train_configs,
+                        device = device
                         )
 
     # explain train set
@@ -344,7 +285,8 @@ if __name__ == '__main__':
                     'n_channels': 3,
                     'n_classes': 10,
                     'width': 32,
-                    'height': 32
+                    'height': 32,
+                    'transforms': transforms.ToTensor(),
                    }
 
     roar_configs = { 'xai_methods': [Saliency()],
@@ -357,6 +299,7 @@ if __name__ == '__main__':
     }
 
     train_configs = {
+                    'criterion': nn.CrossEntropyLoss,
                     'lr_scaler': 1.5,
                     'lr_scaler_end_fraction': 0.1,
                     'epochs': 20,
@@ -373,7 +316,8 @@ if __name__ == '__main__':
                                                   data_configs,
                                                   roar_configs,
                                                   model_configs,
-                                                  train_configs)
+                                                  train_configs,
+                                                  device)
 
 
 
