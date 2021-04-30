@@ -219,6 +219,7 @@ def eval_roar(xai_method,
     # define model
     model = model_configs['model'](in_channels = data_configs['n_channels'],
                                    num_classes = data_configs['n_classes'])
+    model.to(device)
 
     # get data class
     dataset = data_configs['dataset'](transforms = data_configs['transforms'],
